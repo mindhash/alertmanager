@@ -294,7 +294,14 @@ func NewMetrics(r prometheus.Registerer) *Metrics {
 }
 
 type PipelineBuilder struct {
-	metrics *Metrics
+	metrics         *Metrics
+	Wait            func() time.Duration
+	Inhibitor       *inhibit.Inhibitor
+	Silencer        *silence.Silencer
+	MuteTimes       map[string][]timeinterval.TimeInterval
+	NotificationLog NotificationLog
+	Peer            Peer
+	RoutingStage    RoutingStage
 }
 
 func NewPipelineBuilder(r prometheus.Registerer) *PipelineBuilder {
@@ -313,7 +320,7 @@ func (pb *PipelineBuilder) New(
 	notificationLog NotificationLog,
 	peer Peer,
 ) RoutingStage {
-	rs := make(RoutingStage, len(receivers))
+	rs := make(RoutingStage)
 
 	ms := NewGossipSettleStage(peer)
 	is := NewMuteStage(inhibitor)
@@ -324,7 +331,22 @@ func (pb *PipelineBuilder) New(
 		st := createReceiverStage(name, receivers[name], wait, notificationLog, pb.metrics)
 		rs[name] = MultiStage{ms, is, tms, ss, st}
 	}
+	pb.RoutingStage = rs
 	return rs
+}
+
+func (pb *PipelineBuilder) AddReceivers(receivers map[string][]Integration) {
+
+	ms := NewGossipSettleStage(pb.Peer)
+	is := NewMuteStage(pb.Inhibitor)
+	ss := NewMuteStage(pb.Silencer)
+	tms := NewTimeMuteStage(pb.MuteTimes)
+
+	for name := range receivers {
+		st := createReceiverStage(name, receivers[name], pb.Wait, pb.NotificationLog, pb.metrics)
+		pb.RoutingStage[name] = MultiStage{ms, is, tms, ss, st}
+	}
+
 }
 
 // createReceiverStage creates a pipeline of stages for a receiver.

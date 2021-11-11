@@ -20,6 +20,9 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/prometheus/alertmanager/notify"
+	"github.com/prometheus/alertmanager/template"
+
 	apiv1 "github.com/prometheus/alertmanager/api/v1"
 	apiv2 "github.com/prometheus/alertmanager/api/v2"
 	"github.com/prometheus/alertmanager/cluster"
@@ -162,6 +165,21 @@ func New(opts Options) (*API, error) {
 		timeout:                  opts.Timeout,
 		inFlightSem:              make(chan struct{}, concurrency),
 	}, nil
+}
+
+func (api *API) SetTemplate(template *template.Template) {
+	api.v1.SetTemplate(template)
+	api.v2.SetTemplate(template)
+}
+
+func (api *API) SetDispatch(dispatch *dispatch.Dispatcher) {
+	api.v1.SetDispatch(dispatch)
+	api.v2.SetDispatch(dispatch)
+}
+
+func (api *API) SetPipelineBuilder(pipelineBuilder *notify.PipelineBuilder) {
+	api.v1.SetPipelineBuilder(pipelineBuilder)
+	api.v2.SetPipelineBuilder(pipelineBuilder)
 }
 
 // Register all APIs. It registers APIv1 with the provided router directly. As

@@ -18,10 +18,15 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/prometheus/alertmanager/template"
+	"gopkg.in/yaml.v2"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
@@ -34,6 +39,16 @@ import (
 	"github.com/prometheus/alertmanager/cluster"
 	"github.com/prometheus/alertmanager/config"
 	"github.com/prometheus/alertmanager/dispatch"
+	"github.com/prometheus/alertmanager/notify"
+	"github.com/prometheus/alertmanager/notify/email"
+	"github.com/prometheus/alertmanager/notify/opsgenie"
+	"github.com/prometheus/alertmanager/notify/pagerduty"
+	"github.com/prometheus/alertmanager/notify/pushover"
+	"github.com/prometheus/alertmanager/notify/slack"
+	"github.com/prometheus/alertmanager/notify/sns"
+	"github.com/prometheus/alertmanager/notify/victorops"
+	"github.com/prometheus/alertmanager/notify/webhook"
+	"github.com/prometheus/alertmanager/notify/wechat"
 	"github.com/prometheus/alertmanager/pkg/labels"
 	"github.com/prometheus/alertmanager/provider"
 	"github.com/prometheus/alertmanager/silence"
@@ -78,7 +93,22 @@ type API struct {
 
 	getAlertStatus getAlertStatusFn
 
-	mtx sync.RWMutex
+	mtx             sync.RWMutex
+	template        *template.Template
+	dispatch        *dispatch.Dispatcher
+	pipelineBuilder *notify.PipelineBuilder
+}
+
+func (api *API) SetPipelineBuilder(pipelineBuilder *notify.PipelineBuilder) {
+	api.pipelineBuilder = pipelineBuilder
+}
+
+func (api *API) SetDispatch(dispatch *dispatch.Dispatcher) {
+	api.dispatch = dispatch
+}
+
+func (api *API) SetTemplate(template *template.Template) {
+	api.template = template
 }
 
 type getAlertStatusFn func(model.Fingerprint) types.AlertStatus
@@ -121,6 +151,7 @@ func (api *API) Register(r *route.Router) {
 
 	r.Get("/status", wrap(api.status))
 	r.Get("/receivers", wrap(api.receivers))
+	r.Post("/receivers", wrap(api.addReceiver))
 
 	r.Get("/alerts", wrap(api.listAlerts))
 	r.Post("/alerts", wrap(api.addAlerts))
@@ -166,6 +197,279 @@ func (api *API) receivers(w http.ResponseWriter, req *http.Request) {
 	}
 
 	api.respond(w, receivers)
+}
+
+// buildReceiverIntegrations builds a list of integration notifiers off of a
+// receiver config.
+func buildReceiverIntegrations(nc *config.Receiver, tmpl *template.Template, logger log.Logger) ([]notify.Integration, error) {
+	var (
+		errs         types.MultiError
+		integrations []notify.Integration
+		add          = func(name string, i int, rs notify.ResolvedSender, f func(l log.Logger) (notify.Notifier, error)) {
+			n, err := f(log.With(logger, "integration", name))
+			if err != nil {
+				errs.Add(err)
+				return
+			}
+			integrations = append(integrations, notify.NewIntegration(n, rs, name, i))
+		}
+	)
+
+	for i, c := range nc.WebhookConfigs {
+		add("webhook", i, c, func(l log.Logger) (notify.Notifier, error) { return webhook.New(c, tmpl, l) })
+	}
+	for i, c := range nc.EmailConfigs {
+		add("email", i, c, func(l log.Logger) (notify.Notifier, error) { return email.New(c, tmpl, l), nil })
+	}
+	for i, c := range nc.PagerdutyConfigs {
+		add("pagerduty", i, c, func(l log.Logger) (notify.Notifier, error) { return pagerduty.New(c, tmpl, l) })
+	}
+	for i, c := range nc.OpsGenieConfigs {
+		add("opsgenie", i, c, func(l log.Logger) (notify.Notifier, error) { return opsgenie.New(c, tmpl, l) })
+	}
+	for i, c := range nc.WechatConfigs {
+		add("wechat", i, c, func(l log.Logger) (notify.Notifier, error) { return wechat.New(c, tmpl, l) })
+	}
+	for i, c := range nc.SlackConfigs {
+		add("slack", i, c, func(l log.Logger) (notify.Notifier, error) { return slack.New(c, tmpl, l) })
+	}
+	for i, c := range nc.VictorOpsConfigs {
+		add("victorops", i, c, func(l log.Logger) (notify.Notifier, error) { return victorops.New(c, tmpl, l) })
+	}
+	for i, c := range nc.PushoverConfigs {
+		add("pushover", i, c, func(l log.Logger) (notify.Notifier, error) { return pushover.New(c, tmpl, l) })
+	}
+	for i, c := range nc.SNSConfigs {
+		add("sns", i, c, func(l log.Logger) (notify.Notifier, error) { return sns.New(c, tmpl, l) })
+	}
+	if errs.Len() > 0 {
+		return nil, &errs
+	}
+	return integrations, nil
+}
+
+func (api *API) checkReceiverConfig(receiver *config.Receiver) *apiError {
+	var err error
+	for _, wh := range receiver.WebhookConfigs {
+		if wh.HTTPConfig == nil {
+			wh.HTTPConfig = api.config.Global.HTTPConfig
+		}
+	}
+	for _, ec := range receiver.EmailConfigs {
+		if ec.Smarthost.String() == "" {
+			if api.config.Global.SMTPSmarthost.String() == "" {
+				err = fmt.Errorf("no global SMTP smarthost set")
+			}
+			ec.Smarthost = api.config.Global.SMTPSmarthost
+		}
+		if ec.From == "" {
+			if api.config.Global.SMTPFrom == "" {
+				err = fmt.Errorf("no global SMTP from set")
+			}
+			ec.From = api.config.Global.SMTPFrom
+		}
+		if ec.Hello == "" {
+			ec.Hello = api.config.Global.SMTPHello
+		}
+		if ec.AuthUsername == "" {
+			ec.AuthUsername = api.config.Global.SMTPAuthUsername
+		}
+		if ec.AuthPassword == "" {
+			ec.AuthPassword = api.config.Global.SMTPAuthPassword
+		}
+		if ec.AuthSecret == "" {
+			ec.AuthSecret = api.config.Global.SMTPAuthSecret
+		}
+		if ec.AuthIdentity == "" {
+			ec.AuthIdentity = api.config.Global.SMTPAuthIdentity
+		}
+		if ec.RequireTLS == nil {
+			ec.RequireTLS = new(bool)
+			*ec.RequireTLS = api.config.Global.SMTPRequireTLS
+		}
+	}
+	for _, sc := range receiver.SlackConfigs {
+		if sc.HTTPConfig == nil {
+			sc.HTTPConfig = api.config.Global.HTTPConfig
+		}
+		if sc.APIURL == nil && len(sc.APIURLFile) == 0 {
+			if api.config.Global.SlackAPIURL == nil && len(api.config.Global.SlackAPIURLFile) == 0 {
+				err = fmt.Errorf("no global Slack API URL set either inline or in a file")
+			}
+			sc.APIURL = api.config.Global.SlackAPIURL
+			sc.APIURLFile = api.config.Global.SlackAPIURLFile
+		}
+	}
+	for _, poc := range receiver.PushoverConfigs {
+		if poc.HTTPConfig == nil {
+			poc.HTTPConfig = api.config.Global.HTTPConfig
+		}
+	}
+	for _, pdc := range receiver.PagerdutyConfigs {
+		if pdc.HTTPConfig == nil {
+			pdc.HTTPConfig = api.config.Global.HTTPConfig
+		}
+		if pdc.URL == nil {
+			if api.config.Global.PagerdutyURL == nil {
+				err = fmt.Errorf("no global PagerDuty URL set")
+			}
+			pdc.URL = api.config.Global.PagerdutyURL
+		}
+	}
+	for _, ogc := range receiver.OpsGenieConfigs {
+		if ogc.HTTPConfig == nil {
+			ogc.HTTPConfig = api.config.Global.HTTPConfig
+		}
+		if ogc.APIURL == nil {
+			if api.config.Global.OpsGenieAPIURL == nil {
+				err = fmt.Errorf("no global OpsGenie URL set")
+			}
+			ogc.APIURL = api.config.Global.OpsGenieAPIURL
+		}
+		if !strings.HasSuffix(ogc.APIURL.Path, "/") {
+			ogc.APIURL.Path += "/"
+		}
+		if ogc.APIKey == "" && len(ogc.APIKeyFile) == 0 {
+			if api.config.Global.OpsGenieAPIKey == "" && len(api.config.Global.OpsGenieAPIKeyFile) == 0 {
+				err = fmt.Errorf("no global OpsGenie API Key set either inline or in a file")
+			}
+			ogc.APIKey = api.config.Global.OpsGenieAPIKey
+			ogc.APIKeyFile = api.config.Global.OpsGenieAPIKeyFile
+		}
+	}
+	for _, wcc := range receiver.WechatConfigs {
+		if wcc.HTTPConfig == nil {
+			wcc.HTTPConfig = api.config.Global.HTTPConfig
+		}
+
+		if wcc.APIURL == nil {
+			if api.config.Global.WeChatAPIURL == nil {
+				err = fmt.Errorf("no global Wechat URL set")
+			}
+			wcc.APIURL = api.config.Global.WeChatAPIURL
+		}
+
+		if wcc.APISecret == "" {
+			if api.config.Global.WeChatAPISecret == "" {
+				err = fmt.Errorf("no global Wechat ApiSecret set")
+			}
+			wcc.APISecret = api.config.Global.WeChatAPISecret
+		}
+
+		if wcc.CorpID == "" {
+			if api.config.Global.WeChatAPICorpID == "" {
+				err = fmt.Errorf("no global Wechat CorpID set")
+			}
+			wcc.CorpID = api.config.Global.WeChatAPICorpID
+		}
+
+		if !strings.HasSuffix(wcc.APIURL.Path, "/") {
+			wcc.APIURL.Path += "/"
+		}
+	}
+	for _, voc := range receiver.VictorOpsConfigs {
+		if voc.HTTPConfig == nil {
+			voc.HTTPConfig = api.config.Global.HTTPConfig
+		}
+		if voc.APIURL == nil {
+			if api.config.Global.VictorOpsAPIURL == nil {
+				err = fmt.Errorf("no global VictorOps URL set")
+			}
+			voc.APIURL = api.config.Global.VictorOpsAPIURL
+		}
+		if !strings.HasSuffix(voc.APIURL.Path, "/") {
+			voc.APIURL.Path += "/"
+		}
+		if voc.APIKey == "" {
+			if api.config.Global.VictorOpsAPIKey == "" {
+				err = fmt.Errorf("no global VictorOps API Key set")
+			}
+			voc.APIKey = api.config.Global.VictorOpsAPIKey
+		}
+	}
+	for _, sns := range receiver.SNSConfigs {
+		if sns.HTTPConfig == nil {
+			sns.HTTPConfig = api.config.Global.HTTPConfig
+		}
+	}
+	if err != nil {
+		return &apiError{err: err, typ: errorBadData}
+	}
+	return nil
+}
+
+func (api *API) setDefaultReceiverForRoute(receiver string) {
+	api.config.Route.Receiver = receiver
+
+}
+
+func (api *API) setGlobalSlackURL(slackURL string) *apiError {
+	u, err := url.Parse(slackURL)
+	if err != nil {
+		return &apiError{err: err, typ: errorBadData}
+	}
+	api.config.Global.SlackAPIURL = &config.SecretURL{URL: u}
+	return nil
+}
+
+func (api *API) addReceiver(w http.ResponseWriter, req *http.Request) {
+	api.mtx.RLock()
+	defer api.mtx.RUnlock()
+
+	decoder := json.NewDecoder(req.Body)
+
+	var postData map[string]string
+	err := decoder.Decode(&postData)
+
+	if err != nil {
+		api.respondError(w, apiError{typ: errorBadData, err: err}, nil)
+		return
+	}
+	receiverString := postData["data"]
+
+	receiver := &config.Receiver{}
+
+	err = yaml.UnmarshalStrict([]byte(receiverString), receiver)
+	if err != nil {
+		api.respondError(w, apiError{err: err, typ: errorBadData}, "error in parsing receiver config")
+		return
+	}
+	apiErrObj := api.checkReceiverConfig(receiver)
+	if apiErrObj != nil {
+		api.respondError(w, *apiErrObj, nil)
+		return
+	}
+	if receiver.SlackConfigs != nil && postData["slack_webhook_url"] != "" {
+		api.setGlobalSlackURL(postData["slack_webhook_url"])
+	}
+
+	// Adding default receiver for route
+	// if api.config.Route == nil {
+	api.setDefaultReceiverForRoute(receiver.Name)
+	// }
+
+	if _, ok := api.pipelineBuilder.RoutingStage[receiver.Name]; ok {
+		api.respondError(w, apiError{err: fmt.Errorf("notification config name %s is not unique", receiver.Name), typ: errorBadData}, nil)
+		return
+	}
+
+	api.dispatch.Stop()
+
+	integration, err := buildReceiverIntegrations(receiver, api.template, api.logger)
+	if err != nil {
+		api.respondError(w, apiError{err: err, typ: errorInternal}, fmt.Sprintf("Error in building receiver integration for receiver: %s", receiver.Name))
+		return
+	}
+
+	receivers := make(map[string][]notify.Integration, 1)
+	receivers[receiver.Name] = integration
+	api.pipelineBuilder.AddReceivers(receivers)
+
+	api.dispatch.SetStage(api.pipelineBuilder.RoutingStage)
+
+	go api.dispatch.Run()
+
+	api.respond(w, receiver)
 }
 
 func (api *API) status(w http.ResponseWriter, req *http.Request) {

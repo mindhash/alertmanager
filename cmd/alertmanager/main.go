@@ -409,6 +409,8 @@ func run() int {
 		}
 		tmpl.ExternalURL = amURL
 
+		api.SetTemplate(tmpl)
+
 		// Build the routing tree and record which receivers are used.
 		routes := dispatch.NewRoute(conf.Route, nil)
 		activeReceivers := make(map[string]struct{})
@@ -454,6 +456,13 @@ func run() int {
 			pipelinePeer = peer
 		}
 
+		pipelineBuilder.Wait = waitFunc
+		pipelineBuilder.Inhibitor = inhibitor
+		pipelineBuilder.Silencer = silencer
+		pipelineBuilder.MuteTimes = muteTimes
+		pipelineBuilder.NotificationLog = notificationLog
+		pipelineBuilder.Peer = pipelinePeer
+
 		pipeline := pipelineBuilder.New(
 			receivers,
 			waitFunc,
@@ -486,6 +495,9 @@ func run() int {
 				)
 			}
 		})
+
+		api.SetPipelineBuilder(pipelineBuilder)
+		api.SetDispatch(disp)
 
 		go disp.Run()
 		go inhibitor.Run()

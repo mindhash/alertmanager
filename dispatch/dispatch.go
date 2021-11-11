@@ -129,6 +129,11 @@ func NewDispatcher(
 	}
 	return disp
 }
+func (d *Dispatcher) SetStage(s notify.Stage) {
+
+	d.stage = s
+
+}
 
 // Run starts dispatching alerts incoming via the updates channel.
 func (d *Dispatcher) Run() {

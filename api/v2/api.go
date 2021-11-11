@@ -21,6 +21,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/alertmanager/notify"
+	"github.com/prometheus/alertmanager/template"
+
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/go-openapi/loads"
@@ -70,7 +73,22 @@ type API struct {
 	logger log.Logger
 	m      *metrics.Alerts
 
-	Handler http.Handler
+	Handler         http.Handler
+	template        *template.Template
+	dispatch        *dispatch.Dispatcher
+	pipelineBuilder *notify.PipelineBuilder
+}
+
+func (api *API) SetPipelineBuilder(pipelineBuilder *notify.PipelineBuilder) {
+	api.pipelineBuilder = pipelineBuilder
+}
+
+func (api *API) SetDispatch(dispatch *dispatch.Dispatcher) {
+	api.dispatch = dispatch
+}
+
+func (api *API) SetTemplate(template *template.Template) {
+	api.template = template
 }
 
 type groupsFn func(func(*dispatch.Route) bool, func(*types.Alert, time.Time) bool) (dispatch.AlertGroups, map[prometheus_model.Fingerprint][]string)
