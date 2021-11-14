@@ -151,7 +151,9 @@ func (api *API) Register(r *route.Router) {
 
 	r.Get("/status", wrap(api.status))
 	r.Get("/receivers", wrap(api.receivers))
+	r.Del("/receivers/", wrap(api.deleteReceiver))
 	r.Post("/receivers", wrap(api.addReceiver))
+	r.Put("/receivers/", wrap(api.editReceiver))
 
 	r.Get("/alerts", wrap(api.listAlerts))
 	r.Post("/alerts", wrap(api.addAlerts))
@@ -176,6 +178,7 @@ type errorType string
 const (
 	errorInternal errorType = "server_error"
 	errorBadData  errorType = "bad_data"
+	errorNotFound errorType = "not_found"
 )
 
 type apiError struct {
@@ -412,6 +415,98 @@ func (api *API) setGlobalSlackURL(slackURL string) *apiError {
 	return nil
 }
 
+func (api *API) deleteReceiver(w http.ResponseWriter, req *http.Request) {
+	api.mtx.RLock()
+	defer api.mtx.RUnlock()
+
+	decoder := json.NewDecoder(req.Body)
+
+	var postData map[string]string
+	err := decoder.Decode(&postData)
+
+	if err != nil {
+		api.respondError(w, apiError{typ: errorBadData, err: err}, nil)
+		return
+	}
+	receiverName := postData["name"]
+
+	_, ok := api.pipelineBuilder.RoutingStage[receiverName]
+	if !ok {
+		apiErrorObj := apiError{typ: errorNotFound, err: fmt.Errorf("no receiver found with name %s", receiverName)}
+		api.respondError(w, apiErrorObj, nil)
+		return
+	}
+
+	api.dispatch.Stop()
+
+	api.pipelineBuilder.DeleteReceiver(receiverName)
+
+	api.dispatch.SetStage(api.pipelineBuilder.RoutingStage)
+
+	go api.dispatch.Run()
+
+	api.respond(w, "receiver deleted successfully")
+
+}
+
+func (api *API) editReceiver(w http.ResponseWriter, req *http.Request) {
+	api.mtx.RLock()
+	defer api.mtx.RUnlock()
+
+	decoder := json.NewDecoder(req.Body)
+
+	var postData map[string]string
+	err := decoder.Decode(&postData)
+
+	if err != nil {
+		api.respondError(w, apiError{typ: errorBadData, err: err}, nil)
+		return
+	}
+	receiverString := postData["data"]
+
+	receiver := &config.Receiver{}
+
+	err = yaml.UnmarshalStrict([]byte(receiverString), receiver)
+	if err != nil {
+		api.respondError(w, apiError{err: err, typ: errorBadData}, "error in parsing receiver config")
+		return
+	}
+
+	_, ok := api.pipelineBuilder.RoutingStage[receiver.Name]
+	if !ok {
+		apiErrorObj := apiError{typ: errorNotFound, err: fmt.Errorf("no receiver found with name %s", receiver.Name)}
+		api.respondError(w, apiErrorObj, nil)
+		return
+	}
+
+	apiErrObj := api.checkReceiverConfig(receiver)
+	if apiErrObj != nil {
+		api.respondError(w, *apiErrObj, nil)
+		return
+	}
+
+	api.dispatch.Stop()
+
+	integration, err := buildReceiverIntegrations(receiver, api.template, api.logger)
+	if err != nil {
+		api.respondError(w, apiError{err: err, typ: errorInternal}, fmt.Sprintf("Error in building receiver integration for receiver: %s", receiver.Name))
+		return
+	}
+
+	receivers := make(map[string][]notify.Integration, 1)
+	receivers[receiver.Name] = integration
+
+	api.pipelineBuilder.DeleteReceiver(receiver.Name)
+	api.pipelineBuilder.AddReceivers(receivers)
+
+	api.dispatch.SetStage(api.pipelineBuilder.RoutingStage)
+
+	go api.dispatch.Run()
+
+	api.respond(w, receiver)
+
+}
+
 func (api *API) addReceiver(w http.ResponseWriter, req *http.Request) {
 	api.mtx.RLock()
 	defer api.mtx.RUnlock()
@@ -439,14 +534,13 @@ func (api *API) addReceiver(w http.ResponseWriter, req *http.Request) {
 		api.respondError(w, *apiErrObj, nil)
 		return
 	}
-	if receiver.SlackConfigs != nil && postData["slack_webhook_url"] != "" {
-		api.setGlobalSlackURL(postData["slack_webhook_url"])
-	}
 
 	// Adding default receiver for route
 	// if api.config.Route == nil {
 	api.setDefaultReceiverForRoute(receiver.Name)
 	// }
+	routes := dispatch.NewRoute(api.config.Route, nil)
+	api.dispatch.SetRoute(routes)
 
 	if _, ok := api.pipelineBuilder.RoutingStage[receiver.Name]; ok {
 		api.respondError(w, apiError{err: fmt.Errorf("notification config name %s is not unique", receiver.Name), typ: errorBadData}, nil)
@@ -1079,6 +1173,8 @@ func (api *API) respondError(w http.ResponseWriter, apiErr apiError, data interf
 		w.WriteHeader(http.StatusBadRequest)
 	case errorInternal:
 		w.WriteHeader(http.StatusInternalServerError)
+	case errorNotFound:
+		w.WriteHeader(http.StatusNotFound)
 	default:
 		panic(fmt.Sprintf("unknown error type %q", apiErr.Error()))
 	}

@@ -134,6 +134,9 @@ func (d *Dispatcher) SetStage(s notify.Stage) {
 	d.stage = s
 
 }
+func (d *Dispatcher) SetRoute(route *Route) {
+	d.route = route
+}
 
 // Run starts dispatching alerts incoming via the updates channel.
 func (d *Dispatcher) Run() {

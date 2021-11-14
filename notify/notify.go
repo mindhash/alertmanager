@@ -335,6 +335,9 @@ func (pb *PipelineBuilder) New(
 	return rs
 }
 
+func (pb *PipelineBuilder) DeleteReceiver(name string) {
+	delete(pb.RoutingStage, name)
+}
 func (pb *PipelineBuilder) AddReceivers(receivers map[string][]Integration) {
 
 	ms := NewGossipSettleStage(pb.Peer)
