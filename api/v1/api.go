@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -511,22 +512,37 @@ func (api *API) addReceiver(w http.ResponseWriter, req *http.Request) {
 	api.mtx.RLock()
 	defer api.mtx.RUnlock()
 
-	decoder := json.NewDecoder(req.Body)
+	// decoder := json.NewDecoder(req.Body)
 
-	var postData map[string]string
-	err := decoder.Decode(&postData)
+	// var postData map[string]string
+	// err := decoder.Decode(&postData)
 
+	// if err != nil {
+	// 	api.respondError(w, apiError{typ: errorBadData, err: err}, nil)
+	// 	return
+	// }
+	// receiverString := postData["data"]
+
+	// receiver := &config.Receiver{}
+
+	// err = yaml.UnmarshalStrict([]byte(receiverString), receiver)
+	// if err != nil {
+	// 	api.respondError(w, apiError{err: err, typ: errorBadData}, "error in parsing receiver config")
+	// 	return
+	// }
+
+	defer req.Body.Close()
+	body, err := ioutil.ReadAll(req.Body)
 	if err != nil {
+
 		api.respondError(w, apiError{typ: errorBadData, err: err}, nil)
 		return
 	}
-	receiverString := postData["data"]
 
 	receiver := &config.Receiver{}
+	if err := json.Unmarshal(body, receiver); err != nil { // Parse []byte to go struct pointer
 
-	err = yaml.UnmarshalStrict([]byte(receiverString), receiver)
-	if err != nil {
-		api.respondError(w, apiError{err: err, typ: errorBadData}, "error in parsing receiver config")
+		api.respondError(w, apiError{typ: errorBadData, err: err}, nil)
 		return
 	}
 	apiErrObj := api.checkReceiverConfig(receiver)
