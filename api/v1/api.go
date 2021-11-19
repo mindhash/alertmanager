@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/prometheus/alertmanager/template"
-	"gopkg.in/yaml.v2"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
@@ -454,22 +453,37 @@ func (api *API) editReceiver(w http.ResponseWriter, req *http.Request) {
 	api.mtx.RLock()
 	defer api.mtx.RUnlock()
 
-	decoder := json.NewDecoder(req.Body)
+	// decoder := json.NewDecoder(req.Body)
 
-	var postData map[string]string
-	err := decoder.Decode(&postData)
+	// var postData map[string]string
+	// err := decoder.Decode(&postData)
 
+	// if err != nil {
+	// 	api.respondError(w, apiError{typ: errorBadData, err: err}, nil)
+	// 	return
+	// }
+	// receiverString := postData["data"]
+
+	// receiver := &config.Receiver{}
+
+	// err = yaml.UnmarshalStrict([]byte(receiverString), receiver)
+	// if err != nil {
+	// 	api.respondError(w, apiError{err: err, typ: errorBadData}, "error in parsing receiver config")
+	// 	return
+	// }
+
+	defer req.Body.Close()
+	body, err := ioutil.ReadAll(req.Body)
 	if err != nil {
+
 		api.respondError(w, apiError{typ: errorBadData, err: err}, nil)
 		return
 	}
-	receiverString := postData["data"]
 
 	receiver := &config.Receiver{}
+	if err := json.Unmarshal(body, receiver); err != nil { // Parse []byte to go struct pointer
 
-	err = yaml.UnmarshalStrict([]byte(receiverString), receiver)
-	if err != nil {
-		api.respondError(w, apiError{err: err, typ: errorBadData}, "error in parsing receiver config")
+		api.respondError(w, apiError{typ: errorBadData, err: err}, nil)
 		return
 	}
 
