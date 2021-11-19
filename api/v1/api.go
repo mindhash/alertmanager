@@ -179,6 +179,7 @@ const (
 	errorInternal errorType = "server_error"
 	errorBadData  errorType = "bad_data"
 	errorNotFound errorType = "not_found"
+	errorConflict errorType = "conflict"
 )
 
 type apiError struct {
@@ -1205,6 +1206,8 @@ func (api *API) respondError(w http.ResponseWriter, apiErr apiError, data interf
 		w.WriteHeader(http.StatusInternalServerError)
 	case errorNotFound:
 		w.WriteHeader(http.StatusNotFound)
+	case errorConflict:
+		w.WriteHeader(http.StatusConflict)
 	default:
 		panic(fmt.Sprintf("unknown error type %q", apiErr.Error()))
 	}
