@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
-	"net/url"
 	"regexp"
 	"sort"
 	"strings"
@@ -407,13 +406,10 @@ func (api *API) setDefaultReceiverForRoute(receiver string) {
 
 }
 
-func (api *API) setGlobalSlackURL(slackURL string) *apiError {
-	u, err := url.Parse(slackURL)
-	if err != nil {
-		return &apiError{err: err, typ: errorBadData}
-	}
-	api.config.Global.SlackAPIURL = &config.SecretURL{URL: u}
-	return nil
+func (api *API) setDefaultGroupByForRoute() {
+
+	api.config.Route.GroupBy = []model.LabelName{"alertname"}
+
 }
 
 func (api *API) deleteReceiver(w http.ResponseWriter, req *http.Request) {
@@ -566,10 +562,9 @@ func (api *API) addReceiver(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Adding default receiver for route
-	// if api.config.Route == nil {
 	api.setDefaultReceiverForRoute(receiver.Name)
-	// }
+	api.setDefaultGroupByForRoute()
+
 	routes := dispatch.NewRoute(api.config.Route, nil)
 	api.dispatch.SetRoute(routes)
 
